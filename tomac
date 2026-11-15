@@ -1,0 +1,52 @@
+#!/bin/bash
+# Send files from the dev box to the Mac over Taildrop.
+#
+#   tomac report.html plot.png      # files land in the Mac's ~/Downloads
+#   tomac some-folder/              # folders go as some-folder.zip
+#
+# Each send is appended to $DROP_INBOX/.dropd/log.jsonl (default ~/inbox) as a
+# "sent" or "failed" event.
+
+set -u
+MAC=${TOMAC_PEER:-@MAC@}     # filled in by install.sh
+LOG=${DROP_INBOX:-$HOME/inbox}/.dropd/log.jsonl
+
+[ $# -gt 0 ] || { echo "usage: tomac FILE..." >&2; exit 2; }
+mkdir -p "$(dirname "$LOG")"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+log() {
+    python3 -c 'import json, sys, datetime
+print(json.dumps({"event": sys.argv[1], "name": sys.argv[2], "bytes": int(sys.argv[3]),
+                  "detail": sys.argv[4],
+                  "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}))' \
+        "$@" >> "$LOG"
+}
+
+rc=0
+for src in "$@"; do
+    src=${src%/}
+    if [ -d "$src" ]; then
+        f="$tmp/$(basename "$src").zip"
+        if ! (cd "$(dirname "$src")" && python3 -m zipfile -c "$f" "$(basename "$src")"); then
+            echo "tomac: could not zip $src" >&2; rc=1; continue
+        fi
+    elif [ -f "$src" ]; then
+        f=$src
+    else
+        echo "tomac: no such file: $src" >&2; rc=1; continue
+    fi
+    name=$(basename "$f")
+    bytes=$(stat -c %s "$f")
+    if err=$(tailscale file cp "$f" "$MAC:" 2>&1); then
+        echo "sent $name ($bytes bytes) -> $MAC"
+        log sent "$name" "$bytes" "to $MAC"
+    else
+        why=$(echo "$err" | tail -1)
+        echo "tomac: $name: $why" >&2
+        log failed "$name" "$bytes" "$why"
+        rc=1
+    fi
+done
+exit $rc
